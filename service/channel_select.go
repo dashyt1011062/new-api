@@ -12,12 +12,17 @@ import (
 )
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	RequestPath  string
-	Retry        *int
-	resetNextTry bool
+	Ctx                 *gin.Context
+	TokenGroup          string
+	ModelName           string
+	RequestPath         string
+	Retry               *int
+	resetNextTry        bool
+	channelIDCycle      bool
+	cycleGroup          string
+	cycleStartChannelID int
+	cycleChannels       []*model.Channel
+	triedChannelIDs     map[int]struct{}
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -44,6 +49,112 @@ func (p *RetryParam) IncreaseRetry() {
 
 func (p *RetryParam) ResetRetryNextTry() {
 	p.resetNextTry = true
+}
+
+// EnableChannelIDCycle switches this request from normal weighted/priority
+// retry to deterministic same-group channel failover. Candidates are
+// snapshotted once and visited in ascending ID order, wrapping after the
+// channel that first failed. Each channel is attempted at most once.
+func (p *RetryParam) EnableChannelIDCycle(group string, startChannelID int) error {
+	if p == nil {
+		return errors.New("retry parameter is nil")
+	}
+	if group == "" {
+		return errors.New("channel ID cycle group is empty")
+	}
+	if p.ModelName == "" {
+		return errors.New("channel ID cycle model is empty")
+	}
+	if startChannelID <= 0 {
+		return errors.New("channel ID cycle start channel is invalid")
+	}
+	channels, err := model.GetEnabledChannelsByGroupModelOrdered(group, p.ModelName, p.RequestPath)
+	if err != nil {
+		return err
+	}
+	p.channelIDCycle = true
+	p.cycleGroup = group
+	p.cycleStartChannelID = startChannelID
+	p.cycleChannels = channels
+	p.triedChannelIDs = map[int]struct{}{startChannelID: {}}
+	return nil
+}
+
+func (p *RetryParam) IsChannelIDCycle() bool {
+	return p != nil && p.channelIDCycle
+}
+
+func (p *RetryParam) MarkChannelTried(channelID int) {
+	if p == nil || channelID <= 0 || !p.channelIDCycle {
+		return
+	}
+	if p.triedChannelIDs == nil {
+		p.triedChannelIDs = make(map[int]struct{})
+	}
+	p.triedChannelIDs[channelID] = struct{}{}
+}
+
+func (p *RetryParam) HasRemainingChannelInCycle() bool {
+	if p == nil || !p.channelIDCycle {
+		return false
+	}
+	for _, channel := range p.cycleChannels {
+		if channel == nil || channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		if _, tried := p.triedChannelIDs[channel.Id]; !tried {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldAttempt keeps normal requests bounded by RetryTimes. Affinity failover
+// is instead bounded by the finite candidate snapshot, allowing one complete
+// pass even when the global retry count is smaller than the candidate count.
+func (p *RetryParam) ShouldAttempt(defaultRetryTimes int) bool {
+	if p == nil {
+		return false
+	}
+	if p.channelIDCycle {
+		return p.HasRemainingChannelInCycle()
+	}
+	return p.GetRetry() <= defaultRetryTimes
+}
+
+func (p *RetryParam) nextChannelInIDCycle() *model.Channel {
+	return nextChannelByIDCycle(p.cycleChannels, p.cycleStartChannelID, p.triedChannelIDs)
+}
+
+func nextChannelByIDCycle(channels []*model.Channel, startChannelID int, tried map[int]struct{}) *model.Channel {
+	if len(channels) == 0 {
+		return nil
+	}
+
+	startIndex := 0
+	foundGreater := false
+	for i, channel := range channels {
+		if channel != nil && channel.Id > startChannelID {
+			startIndex = i
+			foundGreater = true
+			break
+		}
+	}
+	if !foundGreater {
+		startIndex = 0
+	}
+
+	for offset := 0; offset < len(channels); offset++ {
+		channel := channels[(startIndex+offset)%len(channels)]
+		if channel == nil || channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		if _, alreadyTried := tried[channel.Id]; alreadyTried {
+			continue
+		}
+		return channel
+	}
+	return nil
 }
 
 // CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
@@ -85,6 +196,9 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	var channel *model.Channel
 	var err error
 	selectGroup := param.TokenGroup
+	if param.IsChannelIDCycle() {
+		return param.nextChannelInIDCycle(), param.cycleGroup, nil
+	}
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 
 	if param.TokenGroup == "auto" {

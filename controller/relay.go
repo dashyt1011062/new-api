@@ -188,7 +188,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for ; retryParam.ShouldAttempt(common.RetryTimes); retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -231,8 +231,29 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		affinityFailover := service.HasChannelAffinityContext(c)
+		remainingRetries := common.RetryTimes - retryParam.GetRetry()
+		if affinityFailover {
+			// Affinity failover is bounded by the finite same-group candidate
+			// snapshot, so the global retry count must not cut it short.
+			remainingRetries = 1
+		}
+		if !shouldRetry(c, newAPIError, remainingRetries) {
 			break
+		}
+
+		if affinityFailover {
+			if !retryParam.IsChannelIDCycle() {
+				cycleGroup := retryParam.TokenGroup
+				if cycleGroup == "auto" {
+					cycleGroup = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+				}
+				if err := retryParam.EnableChannelIDCycle(cycleGroup, channel.Id); err != nil {
+					logger.LogError(c, fmt.Sprintf("enable affinity channel ID cycle failed: %s", err.Error()))
+					break
+				}
+			}
+			retryParam.MarkChannelTried(channel.Id)
 		}
 	}
 
@@ -291,7 +312,7 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
+	if info.ChannelMeta == nil && !retryParam.IsChannelIDCycle() {
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {

@@ -641,6 +641,17 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 	return meta.SkipRetry
 }
 
+// HasChannelAffinityContext reports whether this request matched an affinity
+// rule and produced a cache key. It is true on both cache hits and misses, so
+// the first request for a new key can also fail over deterministically.
+func HasChannelAffinityContext(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	_, ok := getChannelAffinityMeta(c)
+	return ok
+}
+
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	if c == nil {
 		return false
