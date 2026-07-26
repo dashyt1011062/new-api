@@ -471,7 +471,7 @@ export function RechargeFormCard({
             </>
           )}
         </div>
-      ) : (
+      ) : !topupLink ? (
         <Alert>
           <AlertDescription>
             {t(
@@ -530,18 +530,30 @@ export function RechargeFormCard({
             </Button>
           </div>
           {topupLink && (
-            <p className='text-muted-foreground text-xs'>
-              {t('Need a redemption code?')}{' '}
-              <a
-                href={topupLink}
-                target='_blank'
-                rel='noopener noreferrer'
-                className='inline-flex items-center gap-1 underline-offset-4 hover:underline'
-              >
-                {t('Get one here')}
-                <ExternalLink className='h-3 w-3' />
-              </a>
-            </p>
+            <div className='space-y-2.5'>
+              <p className='text-muted-foreground text-xs'>
+                {t('Need a redemption code?')}{' '}
+                <a
+                  href={topupLink}
+                  target='_blank'
+                  rel='noopener noreferrer'
+                  className='inline-flex items-center gap-1 underline-offset-4 hover:underline'
+                >
+                  {t('Get one here')}
+                  <ExternalLink className='h-3 w-3' />
+                </a>
+              </p>
+              <div className='bg-background overflow-hidden rounded-lg border'>
+                <iframe
+                  title={t('Redemption code shop')}
+                  src={topupLink}
+                  className='h-[720px] w-full border-0 sm:h-[760px] lg:h-[820px]'
+                  loading='lazy'
+                  referrerPolicy='strict-origin-when-cross-origin'
+                  sandbox='allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts allow-top-navigation-by-user-activation'
+                />
+              </div>
+            </div>
           )}
         </div>
       ) : (
