@@ -479,7 +479,7 @@ export function RechargeFormCard({
             )}
           </AlertDescription>
         </Alert>
-      )}
+      ) : null}
 
       {/* Creem Products Section */}
       {enableCreemTopup &&
