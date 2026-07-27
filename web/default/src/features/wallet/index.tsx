@@ -259,12 +259,6 @@ export function Wallet(props: WalletProps) {
           <div className='mx-auto flex w-full max-w-7xl flex-col gap-4 sm:gap-5'>
             <WalletStatsCard user={user} loading={userLoading} />
 
-            <SubscriptionPlansCard
-              topupInfo={topupInfo}
-              userQuota={user?.quota}
-              onPurchaseSuccess={fetchUser}
-            />
-
             <div id='wallet-add-funds' className='scroll-mt-4'>
               <RechargeFormCard
                 topupInfo={topupInfo}
@@ -298,6 +292,12 @@ export function Wallet(props: WalletProps) {
                 }
               />
             </div>
+
+            <SubscriptionPlansCard
+              topupInfo={topupInfo}
+              userQuota={user?.quota}
+              onPurchaseSuccess={fetchUser}
+            />
 
             <AffiliateRewardsCard
               user={user}
