@@ -251,6 +251,8 @@ export function Wallet(props: WalletProps) {
     return topupInfo?.discount?.[topupAmount] || DEFAULT_DISCOUNT_RATE
   }, [topupInfo, topupAmount])
 
+  const showSubscriptionPlansInWallet = false
+
   return (
     <>
       <SectionPageLayout>
@@ -258,6 +260,14 @@ export function Wallet(props: WalletProps) {
         <SectionPageLayout.Content>
           <div className='mx-auto flex w-full max-w-7xl flex-col gap-4 sm:gap-5'>
             <WalletStatsCard user={user} loading={userLoading} />
+
+            {showSubscriptionPlansInWallet && (
+              <SubscriptionPlansCard
+                topupInfo={topupInfo}
+                userQuota={user?.quota}
+                onPurchaseSuccess={fetchUser}
+              />
+            )}
 
             <div id='wallet-add-funds' className='scroll-mt-4'>
               <RechargeFormCard
@@ -292,12 +302,6 @@ export function Wallet(props: WalletProps) {
                 }
               />
             </div>
-
-            <SubscriptionPlansCard
-              topupInfo={topupInfo}
-              userQuota={user?.quota}
-              onPurchaseSuccess={fetchUser}
-            />
 
             <AffiliateRewardsCard
               user={user}
