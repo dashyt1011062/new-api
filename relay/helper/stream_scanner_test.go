@@ -92,11 +92,12 @@ func TestStreamScannerHandler_EmptyBody(t *testing.T) {
 	c, resp, info := setupStreamTest(t, strings.NewReader(""))
 
 	var called atomic.Bool
-	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+	err := StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
 		called.Store(true)
 	})
 
 	assert.False(t, called.Load(), "handler should not be called for empty body")
+	assert.ErrorIs(t, err, ErrEmptyUpstreamStream)
 }
 
 func TestStreamScannerHandler_1000Chunks(t *testing.T) {
@@ -405,11 +406,24 @@ func TestStreamScannerHandler_StreamStatus_EOFWithoutDone(t *testing.T) {
 	}
 	c, resp, info := setupStreamTest(t, strings.NewReader(b.String()))
 
-	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+	err := StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
 
 	require.NotNil(t, info.StreamStatus)
 	assert.Equal(t, relaycommon.StreamEndReasonEOF, info.StreamStatus.EndReason)
 	assert.True(t, info.StreamStatus.IsNormalEnd())
+	assert.NoError(t, err)
+}
+
+func TestStreamScannerHandler_DoneWithoutDataIsUpstreamError(t *testing.T) {
+	t.Parallel()
+
+	c, resp, info := setupStreamTest(t, strings.NewReader("data: [DONE]\n"))
+
+	err := StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	assert.ErrorIs(t, err, ErrEmptyUpstreamStream)
 }
 
 func TestStreamScannerHandler_StreamStatus_HandlerStop(t *testing.T) {

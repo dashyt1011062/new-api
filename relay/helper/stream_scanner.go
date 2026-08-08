@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+var ErrEmptyUpstreamStream = errors.New("upstream stream ended before first data event")
 
 const (
 	InitialScannerBufferSize    = 64 << 10  // 64KB (64*1024)
@@ -74,10 +77,10 @@ func ExtendWriteDeadline(c *gin.Context) {
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 }
 
-func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
+func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) error {
 
 	if resp == nil || dataHandler == nil {
-		return
+		return nil
 	}
 
 	// 无条件新建 StreamStatus
@@ -302,9 +305,17 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	cleanup()
+	var emptyStreamErr error
+	if info.ReceivedResponseCount == 0 && info.StreamStatus.EndReason != relaycommon.StreamEndReasonClientGone {
+		emptyStreamErr = ErrEmptyUpstreamStream
+		info.StreamStatus.RecordError(emptyStreamErr.Error())
+	}
+
 	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
 		logger.LogInfo(c, fmt.Sprintf("stream ended: %s", info.StreamStatus.Summary()))
 	} else {
 		logger.LogError(c, fmt.Sprintf("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
 	}
+
+	return emptyStreamErr
 }
