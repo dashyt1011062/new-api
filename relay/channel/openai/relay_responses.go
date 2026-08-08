@@ -17,6 +17,53 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const maxBufferedResponsesStreamEvents = 32
+
+type bufferedResponsesStreamEvent struct {
+	response dto.ResponsesStreamResponse
+	data     string
+}
+
+func responsesStreamEventStartsDelivery(streamResponse dto.ResponsesStreamResponse) bool {
+	if strings.HasSuffix(streamResponse.Type, ".delta") && strings.TrimSpace(streamResponse.Delta) != "" {
+		return true
+	}
+
+	if streamResponse.Type != "response.completed" && streamResponse.Type != "response.done" {
+		return false
+	}
+	if streamResponse.Response == nil {
+		return false
+	}
+	return service.ValidUsage(streamResponse.Response.Usage) || len(streamResponse.Response.Output) > 0
+}
+
+func copyResponsesStreamUsage(response *dto.OpenAIResponsesResponse, usage *dto.Usage, c *gin.Context) {
+	if response == nil {
+		return
+	}
+	if response.Usage != nil {
+		if response.Usage.InputTokens != 0 {
+			usage.PromptTokens = response.Usage.InputTokens
+		}
+		if response.Usage.OutputTokens != 0 {
+			usage.CompletionTokens = response.Usage.OutputTokens
+		}
+		if response.Usage.TotalTokens != 0 {
+			usage.TotalTokens = response.Usage.TotalTokens
+		}
+		if response.Usage.InputTokensDetails != nil {
+			usage.PromptTokensDetails.CachedTokens = response.Usage.InputTokensDetails.CachedTokens
+			usage.PromptTokensDetails.CacheWriteTokens = response.Usage.InputTokensDetails.CacheWriteTokens
+		}
+	}
+	if response.HasImageGenerationCall() {
+		c.Set("image_generation_call", true)
+		c.Set("image_generation_call_quality", response.GetQuality())
+		c.Set("image_generation_call_size", response.GetSize())
+	}
+}
+
 func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
@@ -79,43 +126,54 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	var usage = &dto.Usage{}
 	var responseTextBuilder strings.Builder
+	// Do not commit metadata-only events to the client before the upstream proves it can deliver a response.
+	bufferedEvents := make([]bufferedResponsesStreamEvent, 0, 4)
+	deliveryStarted := false
+	var responseErr *types.NewAPIError
+
+	emit := func(event bufferedResponsesStreamEvent) error {
+		return helper.ResponseChunkData(c, event.response, event.data)
+	}
+	flushBufferedEvents := func() error {
+		for _, event := range bufferedEvents {
+			if err := emit(event); err != nil {
+				return err
+			}
+		}
+		bufferedEvents = nil
+		deliveryStarted = true
+		return nil
+	}
 
 	streamErr := helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-
-		// 检查当前数据是否包含 completed 状态和 usage 信息
 		var streamResponse dto.ResponsesStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
-			sr.Error(err)
+			if !deliveryStarted {
+				responseErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+				sr.Stop(responseErr)
+			} else {
+				sr.Error(err)
+			}
 			return
 		}
-		sendResponsesStreamData(c, streamResponse, data)
-		switch streamResponse.Type {
-		case "response.completed":
-			if streamResponse.Response != nil {
-				if streamResponse.Response.Usage != nil {
-					if streamResponse.Response.Usage.InputTokens != 0 {
-						usage.PromptTokens = streamResponse.Response.Usage.InputTokens
-					}
-					if streamResponse.Response.Usage.OutputTokens != 0 {
-						usage.CompletionTokens = streamResponse.Response.Usage.OutputTokens
-					}
-					if streamResponse.Response.Usage.TotalTokens != 0 {
-						usage.TotalTokens = streamResponse.Response.Usage.TotalTokens
-					}
-					if streamResponse.Response.Usage.InputTokensDetails != nil {
-						usage.PromptTokensDetails.CachedTokens = streamResponse.Response.Usage.InputTokensDetails.CachedTokens
-						usage.PromptTokensDetails.CacheWriteTokens = streamResponse.Response.Usage.InputTokensDetails.CacheWriteTokens
-					}
-				}
-				if streamResponse.Response.HasImageGenerationCall() {
-					c.Set("image_generation_call", true)
-					c.Set("image_generation_call_quality", streamResponse.Response.GetQuality())
-					c.Set("image_generation_call_size", streamResponse.Response.GetSize())
-				}
+
+		if streamResponse.Type == "response.error" || streamResponse.Type == "response.failed" || streamResponse.Type == "response.incomplete" {
+			if !deliveryStarted {
+				responseErr = types.NewOpenAIError(
+					fmt.Errorf("upstream responses stream ended with %s", streamResponse.Type),
+					types.ErrorCodeBadResponse,
+					http.StatusBadGateway,
+				)
+				sr.Stop(responseErr)
 			}
+			return
+		}
+
+		switch streamResponse.Type {
+		case "response.completed", "response.done":
+			copyResponsesStreamUsage(streamResponse.Response, usage, c)
 		case "response.output_text.delta":
-			// 处理输出文本
 			responseTextBuilder.WriteString(streamResponse.Delta)
 		case dto.ResponsesOutputTypeItemDone:
 			// 函数调用处理
@@ -130,9 +188,43 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				}
 			}
 		}
+
+		event := bufferedResponsesStreamEvent{response: streamResponse, data: data}
+		if deliveryStarted {
+			if err := emit(event); err != nil {
+				sr.Error(err)
+			}
+			return
+		}
+
+		if len(bufferedEvents) >= maxBufferedResponsesStreamEvents {
+			responseErr = types.NewOpenAIError(
+				fmt.Errorf("upstream responses stream did not produce a deliverable event"),
+				types.ErrorCodeEmptyResponse,
+				http.StatusBadGateway,
+			)
+			sr.Stop(responseErr)
+			return
+		}
+		bufferedEvents = append(bufferedEvents, event)
+		if responsesStreamEventStartsDelivery(streamResponse) {
+			if err := flushBufferedEvents(); err != nil {
+				sr.Error(err)
+			}
+		}
 	})
 	if streamErr != nil {
 		return nil, types.NewOpenAIError(streamErr, types.ErrorCodeEmptyResponse, http.StatusBadGateway)
+	}
+	if responseErr != nil {
+		return nil, responseErr
+	}
+	if !deliveryStarted {
+		return nil, types.NewOpenAIError(
+			fmt.Errorf("upstream responses stream ended without a deliverable event"),
+			types.ErrorCodeEmptyResponse,
+			http.StatusBadGateway,
+		)
 	}
 
 	if usage.CompletionTokens == 0 {
