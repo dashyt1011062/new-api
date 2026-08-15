@@ -36,6 +36,12 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+  InputGroupText,
+} from '@/components/ui/input-group'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { register, wechatLoginByCode } from '@/features/auth/api'
@@ -51,6 +57,16 @@ import {
 } from '@/features/auth/lib/storage'
 import { useStatus } from '@/hooks/use-status'
 import { cn } from '@/lib/utils'
+
+const QQ_EMAIL_SUFFIX = '@qq.com'
+
+function toQQEmail(value: string) {
+  const email = value.trim()
+  if (!email) return ''
+  return email.toLowerCase().endsWith(QQ_EMAIL_SUFFIX)
+    ? email
+    : `${email}${QQ_EMAIL_SUFFIX}`
+}
 
 export function SignUpForm({
   className,
@@ -141,9 +157,11 @@ export function SignUpForm({
       return
     }
 
+    const email = toQQEmail(data.email || '')
+
     // Validate email verification if required
     if (emailVerificationRequired) {
-      if (!data.email) {
+      if (!email) {
         toast.error(t('Please enter your email'))
         return
       }
@@ -160,7 +178,7 @@ export function SignUpForm({
       const res = await register({
         username: data.username,
         password: data.password,
-        email: data.email || undefined,
+        email: email || undefined,
         verification_code: verificationCode || undefined,
         aff_code: getAffiliateCode(),
         turnstile: turnstileToken,
@@ -180,7 +198,7 @@ export function SignUpForm({
   }
 
   async function handleSendVerificationCode() {
-    await sendCode(emailValue || '')
+    await sendCode(toQQEmail(emailValue || ''))
   }
 
   const handleOpenWeChatDialog = () => {
@@ -291,11 +309,22 @@ export function SignUpForm({
                     {t('Email (required for verification)')}
                   </FormLabel>
                   <FormControl>
-                    <Input
-                      placeholder={t('name@example.com')}
-                      type='email'
-                      {...field}
-                    />
+                    <InputGroup>
+                      <InputGroupInput
+                        type='text'
+                        inputMode='email'
+                        autoComplete='email'
+                        placeholder='输入 QQ 号'
+                        {...field}
+                        value={field.value || ''}
+                        onChange={(event) =>
+                          field.onChange(event.target.value.split('@')[0])
+                        }
+                      />
+                      <InputGroupAddon align='inline-end'>
+                        <InputGroupText>{QQ_EMAIL_SUFFIX}</InputGroupText>
+                      </InputGroupAddon>
+                    </InputGroup>
                   </FormControl>
                   <FormMessage />
                 </FormItem>
